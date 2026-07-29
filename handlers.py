@@ -1,7 +1,7 @@
 import os
 import tempfile
 import re
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from google import genai
 from google.genai import types
@@ -145,6 +145,19 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         report_text = response.text
         
+        # TRANSCRIPT ni ajratib olish
+        transcript_text = None
+        if "---TRANSCRIPT---" in report_text:
+            parts = report_text.split("---TRANSCRIPT---")
+            report_text = parts[0].strip()
+            if len(parts) > 1:
+                transcript_text = parts[1].strip()
+                
+        # Agar audio mos bo'lmasa, qaytarish
+        if "Ushbu audio tahlil uchun mos emas" in report_text:
+            await status_message.edit_text("🚫 **Ushbu audio tahlil uchun mos emas** (Suhbat aniqlanmadi).", parse_mode="Markdown")
+            return
+            
         # Telegram Markdown v1 uchun to'g'irlash
         formatted_text = re.sub(r'^\*\s+', '• ', report_text, flags=re.MULTILINE)
         formatted_text = formatted_text.replace('**', '*')
@@ -157,28 +170,36 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if score_match:
             score = int(score_match.group(1))
 
-        # Hisobotni qaytarish
-        try:
-            await status_message.edit_text(formatted_text, parse_mode="Markdown")
-        except Exception as md_err:
-            if "parse entities" in str(md_err).lower() or "can't parse" in str(md_err).lower():
-                await status_message.edit_text(formatted_text)
-            else:
-                raise md_err
-        
-        # Bazaga saqlash
+        # Bazaga saqlash va ID ni olish
         user = message.from_user
         username = f"@{user.username}" if user.username else user.first_name
         audio_type = "voice" if message.voice else "audio/document"
-        database.save_report(
+        report_id = database.save_report(
             user_id=user.id,
             username=username,
             chat_id=message.chat.id,
             chat_type=message.chat.type,
             audio_type=audio_type,
             report_text=report_text,
-            score=score
+            score=score,
+            transcript=transcript_text
         )
+        
+        # Matn tugmasini yaratish
+        reply_markup = None
+        if transcript_text:
+            reply_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Matnni ko'rish", callback_data=f"transcript_{report_id}")]
+            ])
+
+        # Hisobotni qaytarish
+        try:
+            await status_message.edit_text(formatted_text, parse_mode="Markdown", reply_markup=reply_markup)
+        except Exception as md_err:
+            if "parse entities" in str(md_err).lower() or "can't parse" in str(md_err).lower():
+                await status_message.edit_text(formatted_text, reply_markup=reply_markup)
+            else:
+                raise md_err
         
         # Gemini serveridan o'chirish
         client.files.delete(name=uploaded_file.name)
@@ -188,3 +209,30 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.remove(temp_path)
+
+async def transcript_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Matnni ko'rish tugmasi bosilganda"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        report_id = int(query.data.split('_')[1])
+        transcript = database.get_transcript(report_id)
+        
+        if transcript:
+            # Markdown v1 uchun to'g'irlash
+            transcript = transcript.replace('**', '*')
+            msg = f"📝 *Audio matni (Transkripsiya):*\n\n{transcript}"
+            
+            # Matn juda uzun bo'lsa xato bermasligi uchun qirqamiz (Telegram limit: 4096 belgi)
+            if len(msg) > 4000:
+                msg = msg[:4000] + "...\n[Matn juda uzun, qirqildi]"
+                
+            try:
+                await query.message.reply_text(msg, parse_mode="Markdown")
+            except Exception:
+                await query.message.reply_text(msg)  # Formatlashsiz yuborish
+        else:
+            await query.message.reply_text("Kechirasiz, ushbu audio matni bazadan topilmadi.")
+    except Exception as e:
+        await query.message.reply_text("Xatolik yuz berdi matnni olishda.")

@@ -23,28 +23,35 @@ def init_db():
         )
     ''')
     
-    # Agar eski bazada score ustuni bo'lmasa, qo'shamiz
+    # Agar eski bazada score yoki transcript ustuni bo'lmasa, qo'shamiz
     try:
         cursor.execute("ALTER TABLE reports ADD COLUMN score INTEGER")
     except sqlite3.OperationalError:
-        # Demak ustun allaqachon mavjud
+        pass
+        
+    try:
+        cursor.execute("ALTER TABLE reports ADD COLUMN transcript TEXT")
+    except sqlite3.OperationalError:
         pass
         
     conn.commit()
     conn.close()
 
-def save_report(user_id: int, username: str, chat_id: int, chat_type: str, audio_type: str, report_text: str, score: int = None):
-    """Yangi tahlil natijasini bazaga saqlash"""
+def save_report(user_id: int, username: str, chat_id: int, chat_type: str, audio_type: str, report_text: str, score: int = None, transcript: str = None):
+    """Yangi tahlil natijasini bazaga saqlash va uning ID sini qaytarish"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     cursor.execute('''
-        INSERT INTO reports (user_id, username, chat_id, chat_type, audio_type, report_text, score, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, username, chat_id, chat_type, audio_type, report_text, score, datetime.now()))
+        INSERT INTO reports (user_id, username, chat_id, chat_type, audio_type, report_text, score, transcript, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, username, chat_id, chat_type, audio_type, report_text, score, transcript, datetime.now()))
     
+    report_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    
+    return report_id
 
 def get_stats():
     """Statistikani olish"""
@@ -104,3 +111,17 @@ def get_latest_reports(limit=5):
     conn.close()
     
     return [{'username': r[0], 'score': r[1], 'created_at': r[2]} for r in results]
+
+def get_transcript(report_id: int):
+    """Berilgan ID bo'yicha matnni olish"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT transcript FROM reports WHERE id = ?', (report_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result and result[0]:
+        return result[0]
+    return None
+

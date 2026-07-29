@@ -1,8 +1,8 @@
 import logging
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 from config import TELEGRAM_BOT_TOKEN
-from handlers import start_handler, text_handler, audio_handler, stats_handler
+from handlers import start_handler, text_handler, audio_handler, stats_handler, transcript_callback
 import database
 
 # Logging sozlamalari
@@ -30,6 +30,9 @@ def main():
     # Handlerlarni qo'shish
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("stats", stats_handler)) # Admin komandasi
+    
+    # Callback query handler (Tugmalar)
+    app.add_handler(CallbackQueryHandler(transcript_callback, pattern='^transcript_'))
     
     # Audio va Voice xabarlarni ushlash (Guruhda va shaxsiyda)
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.AUDIO, audio_handler))
