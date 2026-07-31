@@ -1,6 +1,7 @@
 import os
 import tempfile
 import re
+import asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from google import genai
@@ -137,11 +138,20 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uploaded_file = client.files.upload(path=temp_path)
         file_part = types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=uploaded_file.mime_type)
         
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[QA_SYSTEM_PROMPT, file_part],
-            config=types.GenerateContentConfig(temperature=0.2)
-        )
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=[QA_SYSTEM_PROMPT, file_part],
+                    config=types.GenerateContentConfig(temperature=0.2)
+                )
+                break
+            except Exception as api_err:
+                if attempt < max_retries - 1 and ("503" in str(api_err) or "429" in str(api_err) or "UNAVAILABLE" in str(api_err)):
+                    await asyncio.sleep(2 ** attempt)  # 1s, 2s
+                    continue
+                raise api_err
         
         report_text = response.text
         
@@ -165,8 +175,8 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Bahoni (Score) qidirib topish
         score = None
-        # "Baho: 8", "Baho: 8 / 10", "Baho: 8" kabilarni ushlash
-        score_match = re.search(r'Baho:.*?(\d+)', report_text, re.IGNORECASE)
+        # "Baho: 8", "Umumiy ball: 8.5" kabilarni ushlash
+        score_match = re.search(r'(?:Baho|Umumiy ball).*?(\d+)', report_text, re.IGNORECASE)
         if score_match:
             score = int(score_match.group(1))
 
@@ -205,7 +215,10 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client.files.delete(name=uploaded_file.name)
         
     except Exception as e:
-        await status_message.edit_text(f"❌ Xatolik yuz berdi:\n`{str(e)}`", parse_mode="Markdown")
+        if "503" in str(e) or "UNAVAILABLE" in str(e):
+            await status_message.edit_text("❌ Sun'iy intellekt serverlarida vaqtinchalik tirbandlik. Iltimos, birozdan so'ng qayta urinib ko'ring.", parse_mode="Markdown")
+        else:
+            await status_message.edit_text(f"❌ Xatolik yuz berdi:\n`{str(e)}`", parse_mode="Markdown")
     finally:
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.remove(temp_path)
