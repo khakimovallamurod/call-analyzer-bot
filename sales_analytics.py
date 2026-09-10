@@ -681,30 +681,36 @@ def strip_source_section(text: str) -> str:
     return cleaned.strip()
 
 
-def format_to_telegram_html(text: str) -> str:
-    """Markdown matnini Telegram xavfsiz HTML formatiga aylantiradi"""
+def format_to_telegram_markdown(text: str) -> str:
+    """Matnni Telegram Markdown formatiga to'liq va xatosiz aylantiradi"""
     # 1. Source qismini olib tashlash
     text = strip_source_section(text)
 
-    # 2. Xavfsiz HTML escape
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 2. Agar HTML teglari kelgan bo'lsa ularni Telegram Markdown ga o'girish
+    text = re.sub(r'</?(?:b|strong)>', '*', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?(?:i|em)>', '_', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?code>', '`', text, flags=re.IGNORECASE)
+    # Boshqa ortiqcha qoldiqlarni tozalash
+    text = re.sub(r'<[^>]+>', '', text)
 
-    # Sarlavhalar: ### Sarlavha -> <b>📌 Sarlavha</b>
-    text = re.sub(r'^[ \t]*#{1,4}\s*(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    # 3. Sarlavhalar: ### Sarlavha -> 📌 *Sarlavha*
+    text = re.sub(r'^[ \t]*#{1,4}\s*(.+)$', r'📌 *\1*', text, flags=re.MULTILINE)
 
-    # Qalin matn: **bold** -> <b>bold</b>
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # 4. Qalin matn: **bold** -> *bold*
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
 
-    # Inline kod: `code` -> <code>code</code>
-    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
-
-    # Ro'yxat belgilari
+    # 5. Ro'yxat belgilari
     text = re.sub(r'^[ \t]*[\*\-]\s+', '• ', text, flags=re.MULTILINE)
 
-    # Ajratuvchi chiziqlar
+    # 6. Ajratuvchi chiziqlar
     text = re.sub(r'^[ \t]*---[ \t]*$', '────────────────────────', text, flags=re.MULTILINE)
 
     return text.strip()
+
+
+def format_to_telegram_html(text: str) -> str:
+    """Moslik uchun format_to_telegram_markdown ni chaqiradi"""
+    return format_to_telegram_markdown(text)
 
 
 async def ask_sales_ai(user_query: str) -> Tuple[str, Optional[str]]:

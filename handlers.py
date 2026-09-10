@@ -177,13 +177,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
         # Savol berildi - Sales AI ga yuboramiz
-        status_msg = await update.message.reply_text("⏳ <i>Ma'lumotlar manbasi o'rganilmoqda va hisob-kitoblar bajarilmoqda...</i>", parse_mode="HTML")
+        status_msg = await update.message.reply_text("⏳ *Ma'lumotlar manbasi o'rganilmoqda va hisob-kitoblar bajarilmoqda...*", parse_mode="Markdown")
         try:
             ai_response, audio_summary = await sales_analytics.ask_sales_ai(query_text)
             
             # Inline audio tugmasini shakllantirish (har doim 100% chiqishi ta'minlanadi)
             if not audio_summary:
-                clean_raw = re.sub(r'<[^>]+>', '', ai_response)
+                clean_raw = re.sub(r'[*_`~\[\]]', '', ai_response)
                 summary_lines = [l.strip() for l in clean_raw.split('\n') if l.strip() and not l.startswith(('•', '-', '📊', '📌', '🏪', '💰', '🏷'))]
                 audio_summary = " ".join(summary_lines[-3:]) if summary_lines else clean_raw[:250]
 
@@ -196,9 +196,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Telegram limiti: 4096 belgi
             if len(ai_response) <= 4000:
                 try:
-                    await status_msg.edit_text(ai_response, parse_mode="HTML", reply_markup=reply_markup)
-                except Exception as html_err:
-                    # Agar biror teg mos kelmasa, xom matn holida chiqaradi
+                    await status_msg.edit_text(ai_response, parse_mode="Markdown", reply_markup=reply_markup)
+                except Exception as md_err:
                     await status_msg.edit_text(ai_response, reply_markup=reply_markup)
             else:
                 # Bir nechta xabarga bo'lish
@@ -219,7 +218,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Tugmani oxirgi qismga qo'yamiz
                     msg_markup = reply_markup if i == len(chunks) - 1 else None
                     try:
-                        await update.message.reply_text(chunk, parse_mode="HTML", reply_markup=msg_markup)
+                        await update.message.reply_text(chunk, parse_mode="Markdown", reply_markup=msg_markup)
                     except Exception:
                         await update.message.reply_text(chunk, reply_markup=msg_markup)
         except Exception as err:
@@ -434,8 +433,8 @@ async def sales_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             bio.name = "sales_summary.mp3"
             await query.message.reply_voice(
                 voice=bio,
-                caption="🎧 <b>Tahlil bo'yicha qisqa audio xulosa</b>\n<i>(Asosiy tahliliy xulosa)</i>",
-                parse_mode="HTML"
+                caption="🎧 *Tahlil bo'yicha audio hisobot*\n_(Asosiy tahliliy xulosa)_",
+                parse_mode="Markdown"
             )
         else:
             await query.message.reply_text("Kechirasiz, audio xulosani shakllantirishda xatolik yuz berdi.")
