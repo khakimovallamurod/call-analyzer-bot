@@ -731,16 +731,31 @@ MUHIM KO'RSATMALAR:
 1. Faqat berilgan aniq hisob-kitoblar va raqamlar asosida tahlil va AI xulosasi bering.
 2. Agar savol yakka mijoz (Customer Deep-Dive) haqida bo'lsa, umumiy shablon yoki boshqa mijozlarni ARALASHTIRMA! Faqat o'sha mijoz ko'rsatkichlariga bag'ishlangan tahlil ber.
 3. JAVOB OXIRIDA SOURCE / MANBA / FAYL NOMI / METADATA kabi bo'limlarni ASLO YOZMA! Ular mutlaqo shart emas.
-4. Javobning eng oxirida audio eshittirish uchun quyidagi maxsus formatda qisqa ovozli xulosa yoz:
+4. Javobning eng oxirida audio eshittirish uchun quyidagi maxsus formatda to'liq, mazmunli va ravon audio hisobot yoz:
 ---AUDIO_SUMMARY---
-[Bu yerda hech qanday belgisiz (*, #, <>) oddiy matn ko'rinishida faqat 2-3 ta ixcham gap yoz. Ushbu gaplar ovozli eshitish uchun juda qulay, savolning eng asosiy mohiyatini va raqamlarini tushuntiruvchi bo'lishi kerak.]
+[Bu yerda hech qanday belgisiz (*, #, <>, bulletlarsiz) toza matn ko'rinishida professional ovozli tahliliy hisobot yoz. Unda:
+- DASTLAB: Umumiy summalarni, jami savdo hajmi, buyurtmalar soni va asosiy raqamlarni ayt (masalan: "3 milliard 928 million so'm").
+- O'RTADA: Asosiy tahlil tafsilotlari (A, B, C guruhlari taqsimoti, eng yirik drayver mijozlar yoki eng ko'p sotilgan mahsulotlar).
+- XULOSA: Tahliliy AI xulosasi va biznes uchun amaliy tavsiyalarni batafsil tushuntirib ber.
+DIQQAT: Juda qisqa qilib qo'yma! Tinglovchi yozma hisobotni o'qimasdan ham faqat audioni eshitib barcha muhim raqamlar, tahliliy bog'liqliklar va xulosalarni to'liq tushunib olsin.]
 """
-        response = client.models.generate_content(
-            model=GEMINI_SALES_MODEL,
-            contents=[SALES_AI_SYSTEM_PROMPT, prompt_payload],
-            config=types.GenerateContentConfig(temperature=0.2)
-        )
-        
+        max_retries = 3
+        response = None
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=GEMINI_SALES_MODEL,
+                    contents=[SALES_AI_SYSTEM_PROMPT, prompt_payload],
+                    config=types.GenerateContentConfig(temperature=0.2)
+                )
+                break
+            except Exception as api_err:
+                if attempt < max_retries - 1 and any(err_code in str(api_err) for err_code in ["503", "429", "UNAVAILABLE"]):
+                    logger.warning(f"Sales AI retry {attempt + 1}/{max_retries} due to {api_err}")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                raise api_err
+
         raw_text = response.text or ""
         
         # Audio summary ajratish
