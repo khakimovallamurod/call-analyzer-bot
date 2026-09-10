@@ -2,7 +2,16 @@ import logging
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 from config import TELEGRAM_BOT_TOKEN
-from handlers import start_handler, text_handler, audio_handler, stats_handler, transcript_callback
+from handlers import (
+    start_handler,
+    text_handler,
+    audio_handler,
+    stats_handler,
+    transcript_callback,
+    audio_command_handler,
+    sales_command_handler,
+    document_handler
+)
 import database
 
 # Logging sozlamalari
@@ -27,15 +36,20 @@ def main():
     # Bot ilovasini yaratish
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Handlerlarni qo'shish
+    # Asosiy komandalar
     app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler(["audio", "call_analyzer"], audio_command_handler))
+    app.add_handler(CommandHandler(["sales", "sales_analytics"], sales_command_handler))
     app.add_handler(CommandHandler("stats", stats_handler)) # Admin komandasi
     
     # Callback query handler (Tugmalar)
     app.add_handler(CallbackQueryHandler(transcript_callback, pattern='^transcript_'))
     
     # Audio va Voice xabarlarni ushlash (Guruhda va shaxsiyda)
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.AUDIO, audio_handler))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, audio_handler))
+    
+    # Hujjatlarni ushlash (Excel, CSV yoki audio hujjatlar)
+    app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     
     # Oddiy matnli xabarlarni ushlash
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))

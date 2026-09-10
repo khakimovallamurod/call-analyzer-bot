@@ -7,10 +7,11 @@ from telegram.ext import ContextTypes
 from google import genai
 from google.genai import types
 
-from config import GEMINI_API_KEY, GEMINI_MODEL, ADMIN_IDS
+from config import GEMINI_API_KEY, GEMINI_AUDIO_MODEL, GEMINI_SALES_MODEL, ADMIN_IDS, DATASETS_DIR
 from prompt import QA_SYSTEM_PROMPT
-from keyboards import get_main_keyboard, get_admin_panel_keyboard
+from keyboards import get_main_keyboard, get_audio_keyboard, get_sales_keyboard, get_admin_panel_keyboard
 import database
+import sales_analytics
 
 # Gemini API ni sozlash
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -22,36 +23,87 @@ WAIT_STICKER = "CAACAgIAAxkBAAEF... (Kutish stikeri ID)"
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Foydalanuvchi /start bosganda"""
     is_admin = update.message.from_user.id in ADMIN_IDS
+    context.user_data['mode'] = None
     welcome_text = (
-        "👋 Assalomu alaykum! Men mijozlarga xizmat ko'rsatish sifatini baholaydigan tahliliy botman.\n\n"
-        "Menga operator va mijoz o'rtasidagi suhbat audiosini yuboring (yoki Forward qiling), "
-        "men uni eshitib to'liq tahlil qilib, sizga hisobot taqdim etaman."
+        "👋 **Assalomu alaykum! Tahliliy botimizga xush kelibsiz!**\n\n"
+        "Botda 2 ta asosiy mustaqil yo'nalish mavjud:\n\n"
+        "1️⃣ **🎙 Qo'ng'iroqlar tahlili (/audio)** — Xodim va mijoz o'rtasidagi audio suhbatlarni eshitib, "
+        "xizmat ko'rsatish sifati, odob-axloq va mijoz ehtiyojlarini tahlil qiladi.\n\n"
+        "2️⃣ **📈 Savdo tahlili (/sales)** — Excel/CSV hisobotlar asosida savdo tushumlari, mijozlar (ABC), "
+        "hududlar va SKU (mahsulotlar) bo'yicha sun'iy intellekt orqali chuqur tahlil beradi.\n\n"
+        "Kerakli bo'limni tanlash uchun quyidagi tugmalardan birini bosing yoki tegishli komandani yuboring."
     )
-    await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(is_admin))
+    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(is_admin))
+
+async def audio_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/audio yoki /call_analyzer komandasi bosilganda"""
+    context.user_data['mode'] = 'audio'
+    text = (
+        "🎙 **Qo'ng'iroqlar tahlili (Call Analyzer) rejimi faollashtirildi!**\n\n"
+        "Menga operator va mijoz o'rtasidagi suhbat audiosini yuboring (Voice, .mp3, .ogg, .wav formatda).\n"
+        "Men uni diqqat bilan eshitib, to'liq tahliliy hisobot va baho taqdim etaman.\n\n"
+        "🔙 Bosh menyuga qaytish uchun *'🔙 Asosiy menyu'* tugmasini bosing."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_audio_keyboard())
+
+async def sales_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/sales yoki /sales_analytics komandasi bosilganda"""
+    context.user_data['mode'] = 'sales'
+    text = (
+        "📈 **Sales AI Analytics rejimi faollashtirildi!**\n\n"
+        "Ushbu rejimda savdo, mijozlar (ABC), hududlar va SKU bo'yicha tahliliy savollaringizni yozishingiz mumkin.\n\n"
+        "💡 **Misol savollar:**\n"
+        "• `Фуркат Курбанов bo'yicha analiz qil`\n"
+        "• `Qaysi hudud eng ko'p sotuv qilgan?`\n"
+        "• `Mijozlar bo'yicha ABC tahlil`\n"
+        "• `Eng ko'p sotilgan SKUlarni ko'rsat`\n\n"
+        "📁 Shuningdek, yangi Excel (.xlsx, .csv) fayl yuborib yangilashingiz ham mumkin.\n\n"
+        "🔙 Bosh menyuga qaytish uchun *'🔙 Asosiy menyu'* tugmasini bosing."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_sales_keyboard())
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Tugmalar bosilganda yoki oddiy matn yuborilganda"""
     if update.message.chat.type in ['group', 'supergroup']:
         return
 
-    text = update.message.text
+    text = update.message.text.strip()
     user_id = update.message.from_user.id
     is_admin = user_id in ADMIN_IDS
+    current_mode = context.user_data.get('mode')
 
-    if text == "📊 Audio yuborish":
-        await update.message.reply_text("🎙 Iltimos, audio faylni (.mp3, .ogg, .wav, yoki Voice) yuboring.")
-    elif text == "ℹ️ Bot haqida":
+    # Rejimlarni ochish tugmalari
+    if text in ["🎙 Qo'ng'iroqlar tahlili (/audio)", "/audio", "/call_analyzer"]:
+        await audio_command_handler(update, context)
+        return
+
+    if text in ["📈 Savdo tahlili (/sales)", "/sales", "/sales_analytics"]:
+        await sales_command_handler(update, context)
+        return
+
+    # Asosiy menyuga qaytish
+    if text in ["🔙 Asosiy menyu", "🔙 Orqaga"]:
+        context.user_data['mode'] = None
+        await update.message.reply_text("Asosiy menyuga qaytdingiz. Kerakli bo'limni tanlang:", reply_markup=get_main_keyboard(is_admin))
+        return
+
+    # Bot haqida
+    if text == "ℹ️ Bot haqida":
         info_text = (
-            "Ushbu bot suhbat audiosini eshitib, xodimning muomalasi, "
-            "mijozning hissiy holati va xizmat sifatini tahlil qiladi."
+            "🤖 **Call Analyzer & Sales AI Bot**\n\n"
+            "Ushbu ko'p tarmoqli tahliliy bot 2 ta asosiy moduldan iborat:\n\n"
+            "1. **Call Analyzer:** Operator va mijoz suhbatini eshitib, odob-axloq, mijoz ehtiyoji, "
+            "bosim yo'qligi bo'yicha ball qo'yadi va to'liq transkripsiyasini taqdim etadi.\n\n"
+            "2. **Sales AI Analytics:** Excel/CSV ma'lumotlari asosida RAG arxitekturasi orqali ABC tahlil, "
+            "hududlar (Gear list bilan JOIN), SKU mahsulotlar va mas'ul agentlar bo'yicha aniq, faktik tahlillarni amalga oshiradi."
         )
         await update.message.reply_text(info_text, parse_mode="Markdown")
-        
+        return
+
     # --- ADMIN MENYULARI ---
-    elif text == "👑 Admin Panel" and is_admin:
+    if text == "👑 Admin Panel" and is_admin:
         await update.message.reply_text("👑 Admin panelga xush kelibsiz!", reply_markup=get_admin_panel_keyboard())
-    elif text == "🔙 Orqaga" and is_admin:
-        await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=get_main_keyboard(is_admin))
+        return
     elif text == "📈 Umumiy Statistika" and is_admin:
         stats = database.get_stats()
         msg = (
@@ -61,6 +113,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚡ Bugungi tahlillar soni: {stats['today_reports']}"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
+        return
     elif text == "🏆 Xodimlar reytingi" and is_admin:
         top = database.get_top_employees(10)
         if not top:
@@ -71,6 +124,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, emp in enumerate(top, 1):
             msg += f"{i}. {emp['username']} — O'rtacha baho: {emp['avg_score']:.1f} ({emp['count']} ta audio)\n"
         await update.message.reply_text(msg, parse_mode="Markdown")
+        return
     elif text == "📝 Oxirgi tahlillar" and is_admin:
         latest = database.get_latest_reports(5)
         if not latest:
@@ -83,8 +137,88 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             date_str = rep['created_at'][:16]
             msg += f"👤 {rep['username']} — {score_text} ({date_str})\n"
         await update.message.reply_text(msg)
-    else:
-        await update.message.reply_text("Iltimos, audio fayl yuboring yoki menyudan foydalaning.")
+        return
+
+    # --- AUDIO REJIMI TUGMALARI ---
+    if current_mode == 'audio':
+        if text == "📊 Audio yuborish":
+            await update.message.reply_text("🎙 Iltimos, audio faylni (.mp3, .ogg, .wav, yoki Voice) yuboring.")
+            return
+        else:
+            await update.message.reply_text(
+                "🎙 Siz hozir **Qo'ng'iroqlar tahlili** rejimidasiz.\n"
+                "Iltimos, audio fayl yuboring yoki boshqa bo'limga o'tish uchun '🔙 Asosiy menyu' tugmasini bosing.",
+                parse_mode="Markdown"
+            )
+            return
+
+    # --- SALES ANALYTICS REJIMI TUGMALARI VA SAVOLLAR ---
+    if current_mode == 'sales':
+        query_text = text
+        if text == "📊 ABC tahlil (Mijozlar)":
+            query_text = "Mijozlar bo'yicha ABC klassifikatsiyasini tahlil qilib ber"
+        elif text == "🗺 Hududlar tahlili":
+            query_text = "Hududlar bo'yicha savdo va reytingni tahlil qilib ber"
+        elif text == "📦 TOP SKUlar":
+            query_text = "Eng ko'p sotilgan TOP SKU mahsulotlarni tahlil qilib ber"
+        elif text == "👥 Agentlar ro'yxati":
+            agents = sales_analytics.get_available_agents()
+            if agents:
+                msg = "👥 **Mavjud savdo agentlari:**\n\n"
+                for i, ag in enumerate(agents, 1):
+                    msg += f"{i}. `{ag}`\n"
+                msg += "\n💡 Biror agent tahlilini ko'rish uchun uning ismini yuboring (masalan: `Фуркат Курбанов bo'yicha analiz qil`)."
+                await update.message.reply_text(msg, parse_mode="Markdown")
+                return
+            else:
+                await update.message.reply_text("Agentlar ro'yxati topilmadi.")
+                return
+
+        # Savol berildi - Sales AI ga yuboramiz
+        status_msg = await update.message.reply_text("⏳ <i>Ma'lumotlar manbasi o'rganilmoqda va hisob-kitoblar bajarilmoqda...</i>", parse_mode="HTML")
+        try:
+            ai_response = await sales_analytics.ask_sales_ai(query_text)
+            
+            # Telegram limiti: 4096 belgi
+            if len(ai_response) <= 4000:
+                try:
+                    await status_msg.edit_text(ai_response, parse_mode="HTML")
+                except Exception as html_err:
+                    # Agar biror teg mos kelmasa, xom matn holida chiqaradi
+                    await status_msg.edit_text(ai_response)
+            else:
+                # Bir nechta xabarga bo'lish
+                await status_msg.delete()
+                # Matnni qismlarga bo'lish (Telegram xabar chegarasi 3800 belgi)
+                lines = ai_response.split('\n')
+                current_chunk = ""
+                chunks = []
+                for line in lines:
+                    if len(current_chunk) + len(line) + 1 > 3800:
+                        chunks.append(current_chunk.strip())
+                        current_chunk = line + "\n"
+                    else:
+                        current_chunk += line + "\n"
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+
+                for chunk in chunks:
+                    try:
+                        await update.message.reply_text(chunk, parse_mode="HTML")
+                    except Exception:
+                        await update.message.reply_text(chunk)
+        except Exception as err:
+            await status_msg.edit_text(f"❌ Xatolik yuz berdi: {str(err)}")
+        return
+
+    # Agar hech qaysi rejim tanlanmagan bo'lsa
+    await update.message.reply_text(
+        "Iltimos, avval pastdagi menyudan kerakli bo'limni tanlang:\n\n"
+        "• 🎙 **Qo'ng'iroqlar tahlili (/audio)**\n"
+        "• 📈 **Savdo tahlili (/sales)**",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard(is_admin)
+    )
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Adminlar uchun statistika (Komanda bilan /stats)"""
@@ -105,6 +239,19 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Audio faylni qabul qilib, Gemini ga yuborish va tahlil qilish"""
     message = update.message
+    current_mode = context.user_data.get('mode')
+
+    # Agar foydalanuvchi Sales rejimida bo'lsa, adashmaslik uchun ogohlantiramiz
+    if current_mode == 'sales':
+        await update.message.reply_text(
+            "⚠️ Siz hozir **Sales AI Analytics** rejimidagiz.\n\n"
+            "Audio suhbatni tahlil qilish uchun avval /audio komandasini yuboring yoki *'🔙 Asosiy menyu'* orqali audio bo'limiga o'ting.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Audio rejimiga avtomatik o'tkazamiz
+    context.user_data['mode'] = 'audio'
     
     audio_file = message.voice or message.audio or message.document
     
@@ -113,7 +260,7 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Kechirasiz, faqat audio fayllarni tahlil qila olaman.")
         return
     
-    if message.document and not message.document.mime_type.startswith('audio/'):
+    if message.document and not (message.document.mime_type and message.document.mime_type.startswith('audio/')):
         if message.chat.type == 'private':
             await update.message.reply_text("Kechirasiz, faqat audio formatdagi fayllarni qabul qilaman.")
         return
@@ -142,7 +289,7 @@ async def audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(
-                    model=GEMINI_MODEL,
+                    model=GEMINI_AUDIO_MODEL,
                     contents=[QA_SYSTEM_PROMPT, file_part],
                     config=types.GenerateContentConfig(temperature=0.2)
                 )
@@ -249,3 +396,46 @@ async def transcript_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_text("Kechirasiz, ushbu audio matni bazadan topilmadi.")
     except Exception as e:
         await query.message.reply_text("Xatolik yuz berdi matnni olishda.")
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Excel yoki CSV fayllar, yoxud audio hujjatlar yuborilganda"""
+    message = update.message
+    doc = message.document
+    if not doc:
+        return
+
+    file_name = doc.file_name or ""
+    lower_name = file_name.lower()
+
+    # Agar audio hujjat bo'lsa
+    if (doc.mime_type and doc.mime_type.startswith('audio/')) or lower_name.endswith(('.mp3', '.ogg', '.wav', '.m4a')):
+        await audio_handler(update, context)
+        return
+
+    # Agar Excel yoki CSV fayl bo'lsa
+    if lower_name.endswith(('.xlsx', '.xls', '.csv')):
+        status_msg = await update.message.reply_text(f"⏳ `{file_name}` qabul qilinmoqda va bazaga yuklanmoqda...", parse_mode="Markdown")
+        try:
+            os.makedirs(DATASETS_DIR, exist_ok=True)
+            save_path = os.path.join(DATASETS_DIR, file_name)
+            
+            new_file = await context.bot.get_file(doc.file_id)
+            await new_file.download_to_drive(save_path)
+
+            # Sales ma'lumotlar bazasini yangilash
+            sales_analytics.data_loader.reload()
+            context.user_data['mode'] = 'sales'
+
+            text = (
+                f"✅ **Yangi hisobot muvaffaqiyatli yuklandi!**\n\n"
+                f"📁 Fayl: `{file_name}`\n"
+                f"📊 Ma'lumotlar bazasi yangilandi va JOIN qilindi.\n\n"
+                f"Endi ushbu fayl bo'yicha tahliliy savollaringizni yozishingiz mumkin (masalan: `Mijozlar ABC tahlili` yoki `Agent bo'yicha analiz`)."
+            )
+            await status_msg.edit_text(text, parse_mode="Markdown", reply_markup=get_sales_keyboard())
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Faylni yuklashda xatolik yuz berdi:\n`{str(e)}`", parse_mode="Markdown")
+        return
+
+    # Boshqa fayl bo'lsa
+    await update.message.reply_text("Kechirasiz, faqat audio fayllar (.mp3, .ogg, .wav) yoki Excel/CSV (.xlsx, .csv) fayllarini tahlil qila olaman.")
