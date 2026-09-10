@@ -2,6 +2,8 @@ import os
 import tempfile
 import re
 import asyncio
+import uuid
+import io
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from google import genai
@@ -177,19 +179,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Savol berildi - Sales AI ga yuboramiz
         status_msg = await update.message.reply_text("⏳ <i>Ma'lumotlar manbasi o'rganilmoqda va hisob-kitoblar bajarilmoqda...</i>", parse_mode="HTML")
         try:
-            ai_response = await sales_analytics.ask_sales_ai(query_text)
+            ai_response, audio_summary = await sales_analytics.ask_sales_ai(query_text)
             
+            # Inline audio tugmasini shakllantirish (har doim 100% chiqishi ta'minlanadi)
+            if not audio_summary:
+                clean_raw = re.sub(r'<[^>]+>', '', ai_response)
+                summary_lines = [l.strip() for l in clean_raw.split('\n') if l.strip() and not l.startswith(('•', '-', '📊', '📌', '🏪', '💰', '🏷'))]
+                audio_summary = " ".join(summary_lines[-3:]) if summary_lines else clean_raw[:250]
+
+            audio_id = str(uuid.uuid4())[:8]
+            context.bot_data.setdefault('sales_audio_cache', {})[audio_id] = audio_summary
+            reply_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔊 Xulosa audiosini eshitish", callback_data=f"sales_audio_{audio_id}")]
+            ])
+
             # Telegram limiti: 4096 belgi
             if len(ai_response) <= 4000:
                 try:
-                    await status_msg.edit_text(ai_response, parse_mode="HTML")
+                    await status_msg.edit_text(ai_response, parse_mode="HTML", reply_markup=reply_markup)
                 except Exception as html_err:
                     # Agar biror teg mos kelmasa, xom matn holida chiqaradi
-                    await status_msg.edit_text(ai_response)
+                    await status_msg.edit_text(ai_response, reply_markup=reply_markup)
             else:
                 # Bir nechta xabarga bo'lish
                 await status_msg.delete()
-                # Matnni qismlarga bo'lish (Telegram xabar chegarasi 3800 belgi)
                 lines = ai_response.split('\n')
                 current_chunk = ""
                 chunks = []
@@ -202,11 +215,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if current_chunk.strip():
                     chunks.append(current_chunk.strip())
 
-                for chunk in chunks:
+                for i, chunk in enumerate(chunks):
+                    # Tugmani oxirgi qismga qo'yamiz
+                    msg_markup = reply_markup if i == len(chunks) - 1 else None
                     try:
-                        await update.message.reply_text(chunk, parse_mode="HTML")
+                        await update.message.reply_text(chunk, parse_mode="HTML", reply_markup=msg_markup)
                     except Exception:
-                        await update.message.reply_text(chunk)
+                        await update.message.reply_text(chunk, reply_markup=msg_markup)
         except Exception as err:
             await status_msg.edit_text(f"❌ Xatolik yuz berdi: {str(err)}")
         return
@@ -396,6 +411,36 @@ async def transcript_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_text("Kechirasiz, ushbu audio matni bazadan topilmadi.")
     except Exception as e:
         await query.message.reply_text("Xatolik yuz berdi matnni olishda.")
+
+async def sales_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xulosa audiosini eshitish tugmasi bosilganda (0 Gemini token sarflaydi!)"""
+    query = update.callback_query
+    await query.answer("🔊 Audio tayyorlanmoqda, kuting...")
+
+    audio_id = query.data.replace("sales_audio_", "").strip()
+    cache = context.bot_data.get('sales_audio_cache', {})
+    audio_text = cache.get(audio_id)
+
+    if not audio_text:
+        # Keshda topilmasa, xabar matnidan olamiz
+        msg_text = query.message.text or query.message.caption or ""
+        lines = [l.strip() for l in msg_text.split('\n') if l.strip() and not l.startswith(('•', '-', '📊', '📌', '🏪', '💰', '🏷'))]
+        audio_text = " ".join(lines[:3]) if lines else "Savdo tahlili hisoboti tayyor."
+
+    try:
+        audio_bytes = await sales_analytics.generate_speech_audio(audio_text)
+        if audio_bytes:
+            bio = io.BytesIO(audio_bytes)
+            bio.name = "sales_summary.mp3"
+            await query.message.reply_voice(
+                voice=bio,
+                caption="🎧 <b>Tahlil bo'yicha qisqa audio xulosa</b>\n<i>(Asosiy tahliliy xulosa)</i>",
+                parse_mode="HTML"
+            )
+        else:
+            await query.message.reply_text("Kechirasiz, audio xulosani shakllantirishda xatolik yuz berdi.")
+    except Exception as e:
+        await query.message.reply_text(f"Audio yaratishda xatolik: {str(e)}")
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Excel yoki CSV fayllar, yoxud audio hujjatlar yuborilganda"""

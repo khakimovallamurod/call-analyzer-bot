@@ -89,18 +89,36 @@ CROSS-ANALYSIS:
 Bir nechta o'lcham so'ralsa (masalan, qaysi hududda qaysi SKU), agentlar natijalarini to'g'ri birlashtir.
 
 ====================================================
-4. AI XULOSA VA MANFIY SUMMA QOIDALARI
+4. YAKKA MIJOZ CHUQUR TAHLILI (CUSTOMER DEEP-DIVE)
+====================================================
+AGAR FOYDALANUVCHI MUAYYAN MIJOZ / DO'KONNI SO'RASA (masalan: "Makon store bo'yicha analiz qil", "Джахонгир haqida ma'lumot", "5161 mijoz"):
+- HECH QACHON umumiy TOP mijozlar shablonini yoki boshqa mijozlar ro'yxatini chiqarma! Javob faqat va faqat so'ralgan mijozga tegishli bo'lishi SHART!
+- Quyidagi tuzilma bo'yicha aniq individual hisobot ber:
+  * 🏪 <b>Mijoz:</b> Nomi, ID raqami va do'kon turi;
+  * 💰 <b>Savdo ko'rsatkichlari:</b> Jami xarid summasi, buyurtmalar soni va o'rtacha xarid summasi;
+  * 🏷 <b>ABC toifasi va Reytingi:</b> Mijoz qaysi guruhga (A, B yoki C) kirishi, umumiy barcha mijozlar ichida nechanchi o'rinda ekanligi (masalan: 698 ta mijoz ichida 12-o'rinda) va umumiy kompaniya savdosidagi foiz ulushi;
+  * 📦 <b>Eng ko'p xarid qilingan tovarlar:</b> Ushbu mijoz eng ko'p olgan TOP SKU mahsulotlar (miqdori va summasi bilan);
+  * 👤 <b>Mas'ul xodim va Joylashuv:</b> Mas'ul agent, hudud va filial;
+  * ⚠️ <b>Qaytarishlar:</b> Agar manfiy tranzaksiyalar bo'lsa ularning summasi;
+  * 💡 <b>AI Xulosasi va Tavsiya:</b> Mijoz bilan ishlashni kuchaytirish, savdoni oshirish yoki toifasini ko'tarish bo'yicha amaliy tavsiya.
+
+====================================================
+5. AI XULOSA VA MANFIY SUMMA QOIDALARI
 ====================================================
 - Shunchaki raqamlar emas, ularning muhim bog'liqliklarini ko'rsat (savdo konsentratsiyasi, asosiy bog'liqliklar).
 - Bir kunlik ma'lumotdan uzoq muddatli trend yoki prediction chiqarma. Tarixiy ma'lumot yetarli bo'lmasa: "Trend yoki prediction uchun yetarli tarixiy ma'lumot mavjud emas" deb ayt.
 - Manfiy "Сумма факт" qiymatlari mavjud bo'lsa, ularni avtomatik oddiy savdo deb hisoblamay: "Manfiy summa qaytarish yoki korrektirovka bo'lishi mumkin, ma'lumotda sababi aniqlanmagan" deb ko'rsat.
 
 ====================================================
-5. JAVOB FORMATI (MUHIM)
+6. JAVOB FORMATI VA AUDIO XULOSA (MUHIM)
 ====================================================
 - DIQQAT: Javob oxirida SOURCE / MANBA / FAYL NOMI / SHEET / QATORLAR metadatasini ASLO CHIQARMA! Ular shart emas.
 - Foydalanuvchi so'ragan savolga to'g'ridan-to'g'ri, lo'nda, qulay va aniq tahlil ber.
 - Raqamlar, foizlar va nomlar aniq ajratilgan bo'lsin.
-- AI Xulosasi (muhim tahliliy bog'liqliklar) keltirilsin.
-- Markdown sarlavhalari (masalan ###) o'rniga emojilar (📊, 👤, 🏆, 💡) va qalin matnlardan foydalan.
+- Markdown sarlavhalari (masalan ###) o'rniga emojilar (📊, 👤, 🏆, 💡, 🏪, 📦) va qalin matnlardan foydalan.
+
+MUHIM QOIDA (AUDIO XULOSA):
+Har bir javobingning eng oxirida quyidagi maxsus ajratuvchi orqali audio eshittirish uchun qisqa matn qoldir:
+---AUDIO_SUMMARY---
+[Bu yerda hech qanday belgisiz (*, #, <>, bulletlarsiz) oddiy matn ko'rinishida faqat 2-3 ta ixcham gap yoz. Ushbu gaplar ovozli eshitish uchun juda qulay, savolning eng asosiy mohiyatini va raqamlarini tushuntiruvchi bo'lishi kerak. Masalan: "Makon store jami o'n besh million so'mlik xarid bilan A toifasidagi mijozlarimiz safiga kiradi va umumiy reytingda o'n ikkinchi o'rinda turibdi. Eng ko'p olingan mahsulot shokoladli vafli hisoblanadi."]
 """

@@ -2,10 +2,13 @@ import os
 import re
 import glob
 import logging
+import asyncio
+import io
 from typing import Dict, Any, Optional, Tuple, List
 import pandas as pd
 from google import genai
 from google.genai import types
+import edge_tts
 
 from config import GEMINI_API_KEY, GEMINI_SALES_MODEL, DATASETS_DIR
 from sales_prompt import SALES_AI_SYSTEM_PROMPT
@@ -148,6 +151,85 @@ def find_matching_agent(query: str) -> Optional[str]:
     return None
 
 
+def get_available_clients() -> pd.DataFrame:
+    """Mavjud mijozlar (do'konlar) ro'yxatini qaytaradi"""
+    loader = SalesDataLoader()
+    target_df = loader.joined_df if loader.joined_df is not None else loader.report_df
+    if target_df is not None and 'Магазин Название' in target_df.columns:
+        cols = ['Магазин №', 'Магазин Название']
+        if 'store_id' in target_df.columns:
+            cols.append('store_id')
+        clients = target_df[cols].dropna(subset=['Магазин Название']).drop_duplicates(subset=['Магазин №'])
+        return clients
+    return pd.DataFrame()
+
+
+def find_matching_client(query: str) -> Optional[Dict[str, Any]]:
+    """
+    Foydalanuvchi so'rovidan qaysi mijoz/do'kon so'ralayotganini topadi.
+    - Do'kon ID raqami (masalan '5161')
+    - To'liq yoki qisman nom bo'yicha ('Makon store', 'Фоодтрук', 'Джахонгир')
+    """
+    clients_df = get_available_clients()
+    if clients_df.empty:
+        return None
+
+    query_lower = query.lower().strip()
+
+    # 1. Do'kon raqami (ID) bo'yicha qidirish (2-6 xonali raqamlar)
+    store_ids = re.findall(r'\b\d{2,6}\b', query_lower)
+    for sid in store_ids:
+        match = clients_df[clients_df['Магазин №'].astype(str).str.replace(r'\.0$', '', regex=True) == sid]
+        if not match.empty:
+            row = match.iloc[0]
+            return {
+                'store_id': str(row['Магазин №']).replace('.0', ''),
+                'store_name': str(row['Магазин Название']).strip()
+            }
+
+    # 2. To'liq yoki qismli nom mosligi (eng uzun moslik birinchi)
+    best_match = None
+    best_len = 0
+    for _, row in clients_df.iterrows():
+        name = str(row['Магазин Название']).strip()
+        name_clean = name.lower()
+        if len(name_clean) >= 3 and name_clean in query_lower:
+            if len(name_clean) > best_len:
+                best_len = len(name_clean)
+                best_match = {
+                    'store_id': str(row['Магазин №']).replace('.0', ''),
+                    'store_name': name
+                }
+    if best_match:
+        return best_match
+
+    # 3. Muhim so'zlar bo'yicha qidirish (stop-so'zlarni chetlab o'tib)
+    stop_words = {
+        'haqida', 'analiz', 'tahlil', 'qil', 'ber', 'qancha', 'savdo', 'bo\'yicha', 'boyicha',
+        'dokon', 'do\'kon', 'dokoni', 'do\'koni', 'mijoz', 'mijozi', 'klient', 'магазин', 'клиент',
+        'ayt', 'berchi', 'korsat', 'ko\'rsat', 'malumot', 'ma\'lumot', 'status', 'nima',
+        'kim', 'qayerda', 'qanaqa', 'qaysi', 'haqida', 'tahlili'
+    }
+    words = [w for w in re.findall(r'[a-zA-Zа-яА-ЯёЁ]{4,}', query_lower) if w not in stop_words]
+    for w in words:
+        for _, row in clients_df.iterrows():
+            name = str(row['Магазин Название']).strip()
+            name_clean = name.lower()
+            name_words = [nw for nw in re.split(r'[\s\(\)\,\.\-\"]+', name_clean) if len(nw) >= 3]
+            if w in name_words:
+                return {
+                    'store_id': str(row['Магазин №']).replace('.0', ''),
+                    'store_name': name
+                }
+            elif len(w) >= 5 and w in name_clean:
+                return {
+                    'store_id': str(row['Магазин №']).replace('.0', ''),
+                    'store_name': name
+                }
+
+    return None
+
+
 def calculate_abc(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Mijozlar bo'yicha ABC klassifikatsiyasini hisoblaydi:
@@ -191,6 +273,106 @@ def calculate_abc(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         'sales_C': float(client_sales[client_sales['Kategoriya'] == 'C']['Сумма факт'].sum()),
     }
     return client_sales, summary
+
+
+def calculate_client_deepdive(df: pd.DataFrame, client_info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Aynan bitta mijoz bo'yicha to'liq chuqur individual hisob-kitoblarni amalga oshiradi:
+    - Jami savdo summasi, buyurtmalar soni, mahsulotlar miqdori
+    - Umumiy ABC dagi toifasi (A, B, C), umumiy reytingdagi o'rni va savdo ulushi
+    - Eng ko'p xarid qilgan mahsulotlari (TOP SKUlar)
+    - Mas'ul agent(lar)
+    - Joylashgan hududi va filiali
+    - Manfiy summalar (qaytarishlar)
+    """
+    store_id = str(client_info.get('store_id', '')).strip()
+    store_name = str(client_info.get('store_name', '')).strip()
+
+    # Umumiy ABC va reytingni hisoblaymiz (bu mijozning kompaniya miqyosidagi o'rnini bilish uchun)
+    client_sales, _ = calculate_abc(df)
+    
+    total_clients_count = len(client_sales)
+
+    # Shu mijozning ABC dagi qatorini topamiz
+    rank = None
+    category = "Noma'lum"
+    share_pct = 0.0
+    client_sales_clean = client_sales.copy()
+    client_sales_clean['id_str'] = client_sales_clean['Магазин №'].astype(str).str.replace(r'\.0$', '', regex=True)
+    
+    match_row = client_sales_clean[client_sales_clean['id_str'] == store_id]
+    if match_row.empty and store_name:
+        match_row = client_sales_clean[client_sales_clean['Магазин Название'] == store_name]
+        
+    if not match_row.empty:
+        rank = int(match_row.index[0]) + 1
+        category = str(match_row.iloc[0]['Kategoriya'])
+        share_pct = float(match_row.iloc[0]['Ulush_%'])
+
+    # Faqat shu mijozning qatorlari
+    df_clean = df.copy()
+    df_clean['id_str'] = df_clean['Магазин №'].astype(str).str.replace(r'\.0$', '', regex=True)
+    c_df = df_clean[df_clean['id_str'] == store_id]
+    if c_df.empty and store_name:
+        c_df = df_clean[df_clean['Магазин Название'] == store_name]
+
+    if c_df.empty:
+        return {
+            'found': False,
+            'client_info': client_info
+        }
+
+    total_sales = float(c_df['Сумма факт'].sum())
+    total_qty = float(c_df['Колв. продуктов факт'].sum()) if 'Колв. продуктов факт' in c_df.columns else 0
+    orders_count = int(c_df['Документ №'].nunique()) if 'Документ №' in c_df.columns else len(c_df)
+    avg_order_val = (total_sales / orders_count) if orders_count > 0 else total_sales
+
+    # Do'kon turlari
+    store_types = [str(t) for t in c_df['Тип магазина'].dropna().unique() if str(t).strip()] if 'Тип магазина' in c_df.columns else []
+
+    # Agentlar
+    agents = []
+    if 'Документ Отв.агент' in c_df.columns:
+        agents.extend([str(a).strip() for a in c_df['Документ Отв.агент'].dropna().unique() if str(a).strip()])
+    if 'Ответственный агент магазина' in c_df.columns:
+        agents.extend([str(a).strip() for a in c_df['Ответственный агент магазина'].dropna().unique() if str(a).strip()])
+    agents = list(dict.fromkeys(agents))  # unikal qilish
+
+    # Hudud va filial
+    territories = [str(t).strip() for t in c_df['Территория'].dropna().unique() if str(t).strip()] if 'Территория' in c_df.columns else []
+    filials = [str(f).strip() for f in c_df['Филиал'].dropna().unique() if str(f).strip()] if 'Филиал' in c_df.columns else []
+
+    # TOP SKUlar (faqat shu mijoz xarid qilgan mahsulotlar)
+    top_skus = []
+    if 'Продукт Название' in c_df.columns:
+        sku_grp = c_df.groupby('Продукт Название').agg(
+            miqdor=('Колв. продуктов факт', 'sum') if 'Колв. продуктов факт' in c_df.columns else ('Сумма факт', 'count'),
+            summa=('Сумма факт', 'sum')
+        ).reset_index().sort_values(by='summa', ascending=False)
+        top_skus = sku_grp.head(10).to_dict(orient='records')
+
+    # Manfiy summalar (qaytarishlar)
+    neg_info = check_negative_values(c_df)
+
+    return {
+        'found': True,
+        'store_id': store_id,
+        'store_name': store_name or (c_df['Магазин Название'].iloc[0] if 'Магазин Название' in c_df.columns else "Noma'lum"),
+        'store_types': store_types,
+        'total_sales': total_sales,
+        'total_qty': total_qty,
+        'orders_count': orders_count,
+        'avg_order_val': avg_order_val,
+        'rank': rank,
+        'total_clients_count': total_clients_count,
+        'category': category,
+        'share_pct': share_pct,
+        'agents': agents,
+        'territories': territories,
+        'filials': filials,
+        'top_skus': top_skus,
+        'negatives': neg_info
+    }
 
 
 def calculate_regions(df: pd.DataFrame) -> pd.DataFrame:
@@ -265,7 +447,7 @@ def check_negative_values(df: pd.DataFrame) -> Dict[str, Any]:
 def prepare_rag_context(user_query: str) -> Dict[str, Any]:
     """
     Foydalanuvchi savoliga qarab RAG qidiruvi va hisob-kitoblarini bajaradi.
-    Tegishli agent, hudud, SKU yoki ABC parametrlarini tanlaydi.
+    Mijoz (Client Deep-Dive), Agent yoki Umumiy tahlil yo'nalishini tanlaydi.
     """
     loader = SalesDataLoader()
     df = loader.joined_df
@@ -275,20 +457,62 @@ def prepare_rag_context(user_query: str) -> Dict[str, Any]:
             'message': "Ma'lumotlar bazasi yoki fayllar yuklanmagan."
         }
 
-    # 1. Agent bormi?
+    query_lower = user_query.lower()
+    is_client_intent = any(w in query_lower for w in ['dokon', "do'kon", 'mijoz', 'klient', 'магазин', 'клиент'])
+    is_agent_intent = any(w in query_lower for w in ['agent', 'xodim', 'sotuvchi', 'menedjer', 'агент', 'сотрудник'])
+
+    target_client = find_matching_client(user_query)
     target_agent = find_matching_agent(user_query)
-    
+
     context_data: Dict[str, Any] = {
         'found': True,
         'user_query': user_query,
-        'target_agent': target_agent,
         'sources': []
     }
 
-    # Asosiy ishchi dataframe
-    working_df = df.copy()
-    if target_agent:
-        working_df = working_df[working_df['Документ Отв.агент'] == target_agent]
+    def _calc_score(q: str, name: str) -> int:
+        q_words = set(re.findall(r'[a-zA-Zа-яА-ЯёЁ0-9]{3,}', q.lower()))
+        clean_name = re.sub(r'[\(\)]', '', name.lower())
+        t_words = set(re.findall(r'[a-zA-Zа-яА-ЯёЁ0-9]{3,}', clean_name))
+        score = len(q_words & t_words)
+        if clean_name.strip() in q.lower():
+            score += 2
+        return score
+
+    # Qaror qabul qilish
+    chosen_mode = 'general'
+    if target_client and target_agent:
+        if is_client_intent:
+            chosen_mode = 'client'
+        elif is_agent_intent:
+            chosen_mode = 'agent'
+        else:
+            c_score = _calc_score(user_query, target_client['store_name'])
+            a_score = _calc_score(user_query, target_agent)
+            chosen_mode = 'agent' if a_score > c_score else 'client'
+    elif target_client:
+        chosen_mode = 'client'
+    elif target_agent:
+        chosen_mode = 'agent'
+
+    # 1. Agar mijoz tanlansa
+    if chosen_mode == 'client':
+        client_details = calculate_client_deepdive(df, target_client)
+        if client_details.get('found'):
+            context_data['query_type'] = 'client'
+            context_data['target_client'] = target_client
+            context_data['client_details'] = client_details
+            return context_data
+
+    # 2. Agar agent tanlansa
+    if chosen_mode == 'agent':
+        context_data['query_type'] = 'agent'
+        context_data['target_agent'] = target_agent
+        working_df = df[df['Документ Отв.агент'] == target_agent].copy()
+    else:
+        # 3. Umumiy tahlil
+        context_data['query_type'] = 'general'
+        working_df = df.copy()
 
     # Source ma'lumotlari
     source_report = {
@@ -320,7 +544,6 @@ def prepare_rag_context(user_query: str) -> Dict[str, Any]:
     context_data['abc_summary'] = abc_summary
     if not client_sales.empty:
         context_data['top_clients'] = client_sales.head(10).to_dict(orient='records')
-        # A, B, C dan namunalar
         context_data['sample_a_clients'] = client_sales[client_sales['Kategoriya'] == 'A'].head(5)[['Магазин Название', 'Сумма факт', 'Ulush_%']].to_dict(orient='records')
 
     # 2-AGENT: Hududlar
@@ -348,6 +571,43 @@ def format_context_for_llm(context: Dict[str, Any]) -> str:
     lines = []
     lines.append("=== RAG RETRIEVAL & EXACT CALCULATIONS RESULT ===")
     lines.append(f"Foydalanuvchi so'rovi: {context['user_query']}")
+
+    # --- YAKKA MIJOZ TAHLILI (CUSTOMER DEEP-DIVE) ---
+    if context.get('query_type') == 'client':
+        c = context['client_details']
+        lines.append("\n[SAVOL TURI: YAKKA MIJOZ / DO'KONNING INDIVIDUAL CHUQUR TAHLILI]:")
+        lines.append(f"DIQQAT: Foydalanuvchi faqat shu mijoz haqida so'ramoqda. Boshqa TOP mijozlar shablonini ARALASHTIRMA! Faqat va faqat ushbu mijoz bo'yicha quyidagi ko'rsatkichlar asosida tahlil ber:")
+        lines.append(f"- Do'kon nomi: {c['store_name']}")
+        lines.append(f"- Do'kon ID raqami: {c['store_id']}")
+        if c['store_types']:
+            lines.append(f"- Do'kon turi: {', '.join(c['store_types'])}")
+        lines.append(f"- Jami xarid summasi: {c['total_sales']:,.2f} so'm")
+        lines.append(f"- Jami xarid qilingan mahsulot miqdori: {c['total_qty']:,.2f}")
+        lines.append(f"- Buyurtmalar (hujjatlar) soni: {c['orders_count']} ta")
+        lines.append(f"- O'rtacha buyurtma (chek) summasi: {c['avg_order_val']:,.2f} so'm")
+        lines.append(f"- ABC Toifasi: {c['category']} guruhi")
+        lines.append(f"- Barcha mijozlar ichidagi reytingi: {c['rank']}-o'rinda (Jami {c['total_clients_count']} ta mijoz orasida)")
+        lines.append(f"- Kompaniyaning umumiy savdosidagi ulushi: {c['share_pct']:.2f}%")
+
+        if c['agents']:
+            lines.append(f"- Mas'ul agent(lar): {', '.join(c['agents'])}")
+        if c['territories']:
+            lines.append(f"- Hudud (Территория): {', '.join(c['territories'])}")
+        if c['filials']:
+            lines.append(f"- Filial: {', '.join(c['filials'])}")
+
+        if c['top_skus']:
+            lines.append("- Ushbu mijoz eng ko'p sotib olgan mahsulotlar (TOP SKU):")
+            for s in c['top_skus']:
+                lines.append(f"  * {s['Продукт Название']}: Summa = {s['summa']:,.2f} so'm, Miqdor = {s['miqdor']:,.2f}")
+
+        if c['negatives'].get('has_negative'):
+            lines.append(f"- Manfiy qaytarishlar mavjud: {c['negatives']['total_negative_sum']:,.2f} so'm ({c['negatives']['count']} ta holat)")
+
+        lines.append("=== RAG END ===")
+        return "\n".join(lines)
+
+    # --- AGENT YOKI UMUMIY TAHLIL ---
     if context.get('target_agent'):
         lines.append(f"Tanlangan Agent: {context['target_agent']}")
     else:
@@ -394,7 +654,6 @@ def format_context_for_llm(context: Dict[str, Any]) -> str:
     if negs.get('has_negative'):
         lines.append(f"\n[DIQQAT: MANFIY QIYMATLAR ANIQLANDI]:")
         lines.append(f"- Manfiy summalar soni: {negs['count']} ta, Jami manfiy summa: {negs['total_negative_sum']:,.2f}")
-        lines.append("  (Manfiy summa qaytarish yoki korrektirovka bo'lishi mumkin, source'da sababi aniqlanmagan)")
 
     # Aniq Source ma'lumotlari
     lines.append("\n[MANBA VA JOIN METADATA (EXACT SOURCE)]:")
@@ -448,13 +707,14 @@ def format_to_telegram_html(text: str) -> str:
     return text.strip()
 
 
-async def ask_sales_ai(user_query: str) -> str:
+async def ask_sales_ai(user_query: str) -> Tuple[str, Optional[str]]:
     """
     Sales AI Orchestrator orqali foydalanuvchi savoliga to'liq javob tayyorlaydi.
-    1. RAG retrieval & calculation
-    2. Prompt validation
+    Qaytaradi: (formatted_html_text, audio_summary_text)
+    1. RAG retrieval & calculation (Mijoz, Agent yoki Umumiy)
+    2. Prompt payload (audio xulosa tegi bilan)
     3. Gemini AI generation
-    4. Formatlash (Telegram HTML va Source tozalash)
+    4. Audio summary ajratib olish va Telegram HTML formatlash
     """
     try:
         context = prepare_rag_context(user_query)
@@ -469,8 +729,11 @@ Quyida RAG tizimi tomonidan Excel/CSV manbalaridan olingan aniq hisob-kitoblar k
 
 MUHIM KO'RSATMALAR:
 1. Faqat berilgan aniq hisob-kitoblar va raqamlar asosida tahlil va AI xulosasi bering.
-2. JAVOB OXIRIDA SOURCE / MANBA / FAYL NOMI / METADATA kabi bo'limlarni ASLO YOZMA! Ular mutlaqo shart emas.
-3. Telegram uchun chiroyli va tushunarli tartibda bayon eting.
+2. Agar savol yakka mijoz (Customer Deep-Dive) haqida bo'lsa, umumiy shablon yoki boshqa mijozlarni ARALASHTIRMA! Faqat o'sha mijoz ko'rsatkichlariga bag'ishlangan tahlil ber.
+3. JAVOB OXIRIDA SOURCE / MANBA / FAYL NOMI / METADATA kabi bo'limlarni ASLO YOZMA! Ular mutlaqo shart emas.
+4. Javobning eng oxirida audio eshittirish uchun quyidagi maxsus formatda qisqa ovozli xulosa yoz:
+---AUDIO_SUMMARY---
+[Bu yerda hech qanday belgisiz (*, #, <>) oddiy matn ko'rinishida faqat 2-3 ta ixcham gap yoz. Ushbu gaplar ovozli eshitish uchun juda qulay, savolning eng asosiy mohiyatini va raqamlarini tushuntiruvchi bo'lishi kerak.]
 """
         response = client.models.generate_content(
             model=GEMINI_SALES_MODEL,
@@ -478,9 +741,59 @@ MUHIM KO'RSATMALAR:
             config=types.GenerateContentConfig(temperature=0.2)
         )
         
-        # Natijani tozalash va HTML formatiga keltirish
         raw_text = response.text or ""
-        return format_to_telegram_html(raw_text)
+        
+        # Audio summary ajratish
+        audio_summary = None
+        if "---AUDIO_SUMMARY---" in raw_text:
+            parts = raw_text.split("---AUDIO_SUMMARY---")
+            report_raw = parts[0].strip()
+            if len(parts) > 1:
+                audio_summary = parts[1].strip()
+                # Tozalash
+                audio_summary = re.sub(r'<[^>]+>', '', audio_summary)
+                audio_summary = re.sub(r'[*_#`~\[\]]', '', audio_summary).strip()
+        else:
+            report_raw = raw_text.strip()
+            # Zaxira: xulosadan qisqa audio matn shakllantirish
+            lines = [l.strip() for l in report_raw.split('\n') if l.strip() and not l.startswith(('#', '<', '•', '-'))]
+            audio_summary = " ".join(lines[-2:]) if lines else report_raw[:200]
+
+        formatted_html = format_to_telegram_html(report_raw)
+        return formatted_html, audio_summary
+
     except Exception as e:
         logger.error(f"Error in ask_sales_ai: {e}")
-        return f"❌ Tahlil jarayonida xatolik yuz berdi:\n<code>{str(e)}</code>"
+        return f"❌ Tahlil jarayonida xatolik yuz berdi:\n<code>{str(e)}</code>", None
+
+
+async def generate_speech_audio(text: str) -> bytes:
+    """
+    Berilgan qisqa matndan Microsoft Edge TTS yordamida audio (.mp3) yaratadi (0 token).
+    O'zbek tili uchun 'uz-UZ-MadinaNeural' ishlatiladi.
+    """
+    clean_text = re.sub(r'<[^>]+>', '', text)
+    clean_text = re.sub(r'[*_#`~\[\]\(\)]', '', clean_text).strip()
+    if not clean_text:
+        clean_text = "Tahlil natijalari tayyor."
+
+    voice = "uz-UZ-MadinaNeural"
+    
+    try:
+        communicate = edge_tts.Communicate(clean_text, voice)
+        audio_stream = b""
+        async for chunk in communicate.stream():
+            if chunk['type'] == 'audio':
+                audio_stream += chunk['data']
+        return audio_stream
+    except Exception as e:
+        logger.error(f"Error in edge_tts: {e}, attempting fallback to gTTS")
+        from gtts import gTTS
+        def _gtts_fallback():
+            tts = gTTS(text=clean_text, lang='ru', slow=False)
+            fp = io.BytesIO()
+            tts.write_to_fp(fp)
+            fp.seek(0)
+            return fp.getvalue()
+        return await asyncio.to_thread(_gtts_fallback)
+

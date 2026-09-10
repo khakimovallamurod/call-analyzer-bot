@@ -8,6 +8,7 @@ from handlers import (
     audio_handler,
     stats_handler,
     transcript_callback,
+    sales_audio_callback,
     audio_command_handler,
     sales_command_handler,
     document_handler
@@ -44,6 +45,7 @@ def main():
     
     # Callback query handler (Tugmalar)
     app.add_handler(CallbackQueryHandler(transcript_callback, pattern='^transcript_'))
+    app.add_handler(CallbackQueryHandler(sales_audio_callback, pattern='^sales_audio_'))
     
     # Audio va Voice xabarlarni ushlash (Guruhda va shaxsiyda)
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, audio_handler))
